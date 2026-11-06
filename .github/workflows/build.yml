@@ -1,0 +1,87 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+            bin: c3rs
+            zipper: zip
+          - os: windows-latest
+            name: windows-x86_64
+            bin: c3rs.exe
+            zipper: ps
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Préparer le paquet
+        shell: bash
+        run: |
+          VER="v0.1.${{ github.run_number }}"
+          PKG="c3rs-${{ matrix.name }}"
+          mkdir -p dist/$PKG
+          cp target/release/${{ matrix.bin }} dist/$PKG/
+          cp README.md LICENSE dist/$PKG/
+          cp assets/sample.c3p dist/$PKG/demo.c3p
+          cat > dist/$PKG/LISEZ-MOI.txt <<'EOF'
+          c3rs — Construct Rust Edition (binaire précompilé, aucune compilation requise)
+
+          - Editeur natif      : lancez c3rs (ou c3rs edit jeu.c3p)
+          - Jouer un .c3p      : c3rs run jeu.c3p
+          - Capture headless   : c3rs render jeu.c3p out.png --ticks 240 --keys 39
+          - Inspecter          : c3rs inspect jeu.c3p
+
+          Import universel : glissez-deposez n'importe quel fichier dans l'editeur
+          (images -> sprites plaçables, .c3p -> projet, audio/polices -> medias).
+          F5 = aperçu jouable.
+          EOF
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          echo "PKG=$PKG" >> "$GITHUB_ENV"
+
+      - name: Zip (Linux)
+        if: matrix.zipper == 'zip'
+        shell: bash
+        run: cd dist && zip -r "${PKG}.zip" "${PKG}" && cd ..
+
+      - name: Zip (Windows)
+        if: matrix.zipper == 'ps'
+        shell: pwsh
+        run: Compress-Archive -Path "dist/${{ env.PKG }}" -DestinationPath "dist/${{ env.PKG }}.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PKG }}
+          path: dist/*.zip
+
+      - name: Créer la release GitHub
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$VER" "dist/${PKG}.zip" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "c3rs $VER — $PKG" \
+            --notes "Binaires precompiles (aucune compilation requise). Editeur natif + runtime .c3p + import universel. Voir README inclus." \
+            || gh release upload "$VER" "dist/${PKG}.zip" --clobber --repo "$GITHUB_REPOSITORY"
