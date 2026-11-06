@@ -1,6 +1,6 @@
 [package]
 name = "c3rs"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Runtime + éditeur natif Rust pour jeux Construct 3 (.c3p) - import universel, 100% natif GPU"
 license = "MIT"

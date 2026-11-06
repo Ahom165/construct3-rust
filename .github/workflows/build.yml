@@ -3,6 +3,7 @@ name: Build & Release
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
@@ -22,6 +23,10 @@ jobs:
             name: windows-x86_64
             bin: c3rs.exe
             zipper: ps
+          - os: macos-14
+            name: macos-aarch64
+            bin: c3rs
+            zipper: zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -38,28 +43,40 @@ jobs:
       - name: Préparer le paquet
         shell: bash
         run: |
-          VER="v0.1.${{ github.run_number }}"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VER="${GITHUB_REF#refs/tags/}"
+          else
+            VER="v0.3.${{ github.run_number }}"
+          fi
           PKG="c3rs-${{ matrix.name }}"
           mkdir -p dist/$PKG
           cp target/release/${{ matrix.bin }} dist/$PKG/
           cp README.md LICENSE dist/$PKG/
           cp assets/sample.c3p dist/$PKG/demo.c3p
           cat > dist/$PKG/LISEZ-MOI.txt <<'EOF'
-          c3rs — Construct Rust Edition (binaire précompilé, aucune compilation requise)
+          c3rs v0.3 — Construct Rust Edition (binaire précompilé, aucune compilation requise)
 
-          - Editeur natif      : lancez c3rs (ou c3rs edit jeu.c3p)
-          - Jouer un .c3p      : c3rs run jeu.c3p
+          - Éditeur natif      : lancez c3rs (ou c3rs edit jeu.c3p)
+          - Jouer un .c3p      : c3rs run jeu.c3p  (flèches/WASD + Espace, Échap pour quitter)
           - Capture headless   : c3rs render jeu.c3p out.png --ticks 240 --keys 39
+                                 (--click x,y --at n simule un clic sur un bouton du menu)
           - Inspecter          : c3rs inspect jeu.c3p
+          - Vérifier           : c3rs validate jeu.c3p
+          - Ré-enregistrer     : c3rs resave jeu.c3p out.c3p
 
-          Import universel : glissez-deposez n'importe quel fichier dans l'editeur
-          (images -> sprites plaçables, .c3p -> projet, audio/polices -> medias).
-          F5 = aperçu jouable.
+          Import universel : glissez-déposez N'IMPORTE QUEL fichier dans l'éditeur
+          (images -> sprites plaçables, .c3p -> projet, audio/polices -> médias).
+          F5 = aperçu jouable intégré.
+
+          v0.3 : Tourelle (cible/rotation/tir), LigneDeMire (raycast), DéplacerVers,
+          Flash, clic souris (on-clicked), points d'image, PNG indexés, TiledBackground,
+          reset-eventvar, littéraux true/false. Testé sur un vrai projet .c3p C3
+          (menu cliquable, ennemis, boss, tourelles, PV, portails).
           EOF
           echo "VER=$VER" >> "$GITHUB_ENV"
           echo "PKG=$PKG" >> "$GITHUB_ENV"
 
-      - name: Zip (Linux)
+      - name: Zip (Linux/macOS)
         if: matrix.zipper == 'zip'
         shell: bash
         run: cd dist && zip -r "${PKG}.zip" "${PKG}" && cd ..
@@ -82,6 +99,10 @@ jobs:
         run: |
           gh release create "$VER" "dist/${PKG}.zip" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "c3rs $VER — $PKG" \
-            --notes "Binaires precompiles (aucune compilation requise). Editeur natif + runtime .c3p + import universel. Voir README inclus." \
+            --title "c3rs $VER" \
+            --notes "Binaires précompilés (aucune compilation requise) — éditeur natif + runtime .c3p + import universel.
+
+          Paquets : c3rs-linux-x86_64, c3rs-windows-x86_64, c3rs-macos-aarch64.
+          Dézippez, lancez : \`c3rs edit\` (éditeur) ou \`c3rs run jeu.c3p\` (jouer).
+          Voir le LISEZ-MOI.txt et le README inclus." \
             || gh release upload "$VER" "dist/${PKG}.zip" --clobber --repo "$GITHUB_REPOSITORY"

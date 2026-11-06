@@ -314,7 +314,7 @@ impl EditorApp {
             members: vec![],
             vars: vec![],
             behaviors: vec![],
-            anims: vec![Anim { name: "Default".into(), frames: vec![k], speed: 0.0, looping: false }],
+            anims: vec![Anim { name: "Default".into(), frames: vec![crate::model::FrameSpec::simple(k.clone())], speed: 0.0, looping: false }],
             is_global: false,
         });
         self.dirty = true;

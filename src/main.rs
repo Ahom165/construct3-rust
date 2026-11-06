@@ -23,6 +23,8 @@ fn help() -> ! {
     println!("  --h <px>          Hauteur de fenêtre");
     println!("  --ticks <n>       (render) nombre de ticks simulés avant capture");
     println!("  --keys <code,..>  (render) touches maintenues (keycodes JS: 39=droite...)");
+    println!("  --click <x,y>     (render) simule un clic aux coordonnées de la vue");
+    println!("  --at <n>          (render) tick du clic (défaut 1)");
     println!();
     println!("CONTRÔLES en jeu: flèches/WASD + Espace (plateforme), Échap pour quitter");
     std::process::exit(0);
@@ -37,6 +39,8 @@ struct Args {
     height: Option<f32>,
     ticks: usize,
     keys: Vec<u32>,
+    click: Option<(f32, f32)>,
+    click_at: usize,
 }
 
 fn parse_args() -> Args {
@@ -55,6 +59,8 @@ fn parse_args() -> Args {
     let mut height = None;
     let mut ticks = 1usize;
     let mut keys = Vec::new();
+    let mut click = None;
+    let mut click_at = 1usize;
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
@@ -80,6 +86,21 @@ fn parse_args() -> Args {
                     keys = list.split(',').filter_map(|k| k.trim().parse().ok()).collect();
                 }
             }
+            "--click" => {
+                i += 1;
+                if let Some(v) = argv.get(i) {
+                    let parts: Vec<&str> = v.split(',').collect();
+                    if parts.len() == 2 {
+                        if let (Ok(x), Ok(y)) = (parts[0].trim().parse(), parts[1].trim().parse()) {
+                            click = Some((x, y));
+                        }
+                    }
+                }
+            }
+            "--at" => {
+                i += 1;
+                click_at = argv.get(i).and_then(|v| v.parse().ok()).unwrap_or(1);
+            }
             other => {
                 if file.is_none() {
                     file = Some(PathBuf::from(other));
@@ -91,7 +112,7 @@ fn parse_args() -> Args {
         i += 1;
     }
     match file {
-        Some(f) => Args { cmd, file: f, extra, layout, width, height, ticks, keys },
+        Some(f) => Args { cmd, file: f, extra, layout, width, height, ticks, keys, click, click_at },
         None => help(),
     }
 }
@@ -177,8 +198,34 @@ fn main() {
             for k in &args.keys {
                 eng.input.down.insert(*k);
             }
-            for _ in 0..args.ticks {
+            for t in 0..args.ticks {
+                // simulation d'un clic souris (coordonnées vue)
+                if let Some((cx, cy)) = args.click {
+                    if t + 1 == args.click_at {
+                        eng.input.mouse = (cx, cy);
+                        eng.input.mouse_down.insert(0);
+                        eng.input.mouse_pressed.insert(0);
+                    }
+                }
                 eng.tick(1.0 / 60.0);
+            }
+            if std::env::var("C3RS_DEBUG").is_ok() {
+                eprintln!("layout actuel : {}", eng.layout.name);
+                for t in &eng.project.types {
+                    if let Some(a) = t.anims.first() {
+                        if let Some(f) = a.frames.first() {
+                            let has = eng.project.images.contains_key(&f.image);
+                            let size = eng.project.images.get(&f.image).map(|x| format!("{}x{}", x.w, x.h)).unwrap_or("-".into());
+                            eprintln!("  TEX {:42} -> {:46} charge={} {}", t.name, f.image, has, size);
+                        }
+                    }
+                }
+                eprintln!("scroll : {:?}", eng.scroll);
+                for i in &eng.instances {
+                    eprintln!("  {:40} x={:8.1} y={:8.1} w={:6.1} visible={} det={}", i.type_name, i.x, i.y, i.w, i.visible, i.destroyed);
+                }
+                eprintln!("globals : {:?}", eng.globals);
+                eprintln!("moveto : {:?}  turret_fired: {:?}", eng.moveto.keys().collect::<Vec<_>>(), eng.turret_fired.len());
             }
             let fb = c3rs::runtime::render_frame(&eng);
             write_png(&out, &fb).expect("écriture PNG");

@@ -160,7 +160,7 @@ impl EditorApp {
                             let key = p
                                 .type_of(&inst.type_name)
                                 .and_then(|t| t.anims.first())
-                                .and_then(|an| an.frames.first().cloned())
+                                .and_then(|an| an.frames.first().map(|f| f.image.clone()))
                                 .unwrap_or_default();
                             match load_tex_cached(&mut self.tex, &ctx2, p, &key) {
                                 Some(tex) => {
@@ -177,7 +177,7 @@ impl EditorApp {
                             let key = p
                                 .type_of(&inst.type_name)
                                 .and_then(|t| t.anims.first())
-                                .and_then(|an| an.frames.first().cloned())
+                                .and_then(|an| an.frames.first().map(|f| f.image.clone()))
                                 .unwrap_or_default();
                             match load_tex_cached(&mut self.tex, &ctx2, p, &key) {
                                 Some(tex) => {
@@ -338,7 +338,7 @@ impl EditorApp {
             .anims
             .first()
             .and_then(|a| a.frames.first())
-            .and_then(|k| p.images.get(k))
+            .and_then(|f| p.images.get(&f.image))
             .map(|tex| (tex.w as f32, tex.h as f32))
             .unwrap_or((64.0, 64.0));
         let layer = self.place_layer.min(p.layouts[li].layers.len().saturating_sub(1));

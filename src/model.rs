@@ -28,23 +28,45 @@ pub enum BKind {
     Timer,
     Wrap,
     Pin,
+    Turret,
+    LineOfSight,
+    MoveTo,
+    Flash,
+    Anchor,
     Other,
 }
 
+/// retire les accents pour la comparaison des noms de comportements FR/EN
+fn deaccent(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'à' | 'â' | 'ä' | 'á' | 'ã' => 'a',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'î' | 'ï' | 'í' => 'i',
+            'ô' | 'ö' | 'ó' => 'o',
+            'ù' | 'û' | 'ü' | 'ú' => 'u',
+            'ç' => 'c',
+            c => c,
+        })
+        .collect::<String>()
+        .to_lowercase()
+}
+
 impl BKind {
+    /// Reconnaît les ids anglais C3 ET les noms français affichés.
     pub fn from_name(s: &str) -> BKind {
-        let l = s.to_lowercase();
+        let l = deaccent(s);
         if l.contains("platform") {
             BKind::Platform
         } else if l == "solid" || l.contains("solid") {
             BKind::Solid
         } else if l.contains("8direction") || l.contains("eightdir") {
             BKind::EightDir
-        } else if l.contains("bullet") {
+        } else if l.contains("bullet") || l == "projectile" || l.contains("projectil") {
             BKind::Bullet
         } else if l.contains("sine") {
             BKind::Sine
-        } else if l.contains("scroll") {
+        } else if l.contains("scroll") || l.contains("defilervers") {
             BKind::ScrollTo
         } else if l.contains("destroyoutside") {
             BKind::DestroyOutside
@@ -54,12 +76,33 @@ impl BKind {
             BKind::Timer
         } else if l.contains("wrap") {
             BKind::Wrap
-        } else if l.contains("pin") {
+        } else if l.contains("turret") || l.contains("tourelle") {
+            BKind::Turret
+        } else if l.contains("lineofsight") || l.contains("lignedemire") || l == "los" {
+            BKind::LineOfSight
+        } else if l.contains("moveto") || l.contains("deplacervers") {
+            BKind::MoveTo
+        } else if l.contains("flash") || l.contains("clignotement") {
+            BKind::Flash
+        } else if l.contains("anchor") || l == "ancre" {
+            BKind::Anchor
+        } else if l.contains("pin") || l.contains("epingle") {
             BKind::Pin
         } else {
             BKind::Other
         }
     }
+    /// essaie l'id canonique puis retombe sur le nom affiché
+    pub fn resolve_fallback(self, display_name: &str) -> BKind {
+        if matches!(self, BKind::Other) && !display_name.is_empty() {
+            let k = BKind::from_name(display_name);
+            if !matches!(k, BKind::Other) {
+                return k;
+            }
+        }
+        self
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             BKind::Platform => "Platform",
@@ -73,6 +116,11 @@ impl BKind {
             BKind::Timer => "Timer",
             BKind::Wrap => "Wrap",
             BKind::Pin => "Pin",
+            BKind::Turret => "Turret",
+            BKind::LineOfSight => "LineOfSight",
+            BKind::MoveTo => "MoveTo",
+            BKind::Flash => "Flash",
+            BKind::Anchor => "Anchor",
             BKind::Other => "Other",
         }
     }
@@ -92,10 +140,25 @@ pub struct BehSpec {
     pub props: HashMap<String, Val>,
 }
 
+/// Une frame d'animation : image + origine + points d'image (fractions 0..1)
+#[derive(Debug, Clone)]
+pub struct FrameSpec {
+    pub image: String, // clé d'image (normalisée)
+    pub ox: f32,
+    pub oy: f32,
+    pub image_points: Vec<(f32, f32)>,
+}
+
+impl FrameSpec {
+    pub fn simple(image: String) -> FrameSpec {
+        FrameSpec { image, ox: 0.5, oy: 0.5, image_points: Vec::new() }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Anim {
     pub name: String,
-    pub frames: Vec<String>, // clés d'images (normalisées)
+    pub frames: Vec<FrameSpec>,
     pub speed: f32,
     pub looping: bool,
 }
@@ -556,11 +619,17 @@ pub fn parse_object_type(doc: &serde_json::Value, warnings: &mut Vec<String>) ->
     let mut behaviors = Vec::new();
     if let Some(arr) = get(doc, &["behaviorTypes", "behaviors"]).and_then(|v| v.as_array()) {
         for b in arr {
-            let bname = get(b, &["name", "behavior-plugin-id", "behaviorId", "id"])
+            let bname = get(b, &["name"])
                 .and_then(|v| v.as_str())
                 .unwrap_or("Inconnu")
                 .to_string();
-            let kind = BKind::from_name(&bname);
+            // l'id canonique anglais prime pour la détection du comportement
+            let bid = get(b, &["behaviorId", "behavior-plugin-id", "id"])
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let kind = BKind::from_name(&bid)
+                .resolve_fallback(&bname);
             let mut bp = HashMap::new();
             if let Some(p) = get(b, &["properties"]).and_then(|x| x.as_object()) {
                 for (pk, pv) in p {
@@ -579,7 +648,7 @@ pub fn parse_object_type(doc: &serde_json::Value, warnings: &mut Vec<String>) ->
                     }
                 }
             }
-            behaviors.push(BehSpec { name: bname, kind, props: bp });
+            behaviors.push(BehSpec { name: if bname == "Inconnu" { bid.clone() } else { bname }, kind, props: bp });
         }
     }
     let mut anims = Vec::new();
@@ -600,11 +669,34 @@ pub fn parse_object_type(doc: &serde_json::Value, warnings: &mut Vec<String>) ->
             let looping = get(a, &["isLooping", "looping", "loop"]).map(|v| as_f64(v, 0.0) != 0.0).unwrap_or(false);
             let mut frames = Vec::new();
             if let Some(fs) = get(a, &["frames"]).and_then(|v| v.as_array()) {
-                for _f in fs {
-                    frames.push(String::new()); // résolu ensuite par heuristique d'images
+                for f in fs {
+                    let ox = get(f, &["originX"]).map(|v| as_f64(v, 0.5)).unwrap_or(0.5) as f32;
+                    let oy = get(f, &["originY"]).map(|v| as_f64(v, 0.5)).unwrap_or(0.5) as f32;
+                    let mut image_points = Vec::new();
+                    if let Some(ips) = get(f, &["imagePoints"]).and_then(|v| v.as_array()) {
+                        for ip in ips {
+                            let ix = get(ip, &["x"]).map(|v| as_f64(v, 0.0)).unwrap_or(0.0) as f32;
+                            let iy = get(ip, &["y"]).map(|v| as_f64(v, 0.0)).unwrap_or(0.0) as f32;
+                            image_points.push((ix, iy));
+                        }
+                    }
+                    frames.push(FrameSpec { image: String::new(), ox, oy, image_points }); // image résolue ensuite
                 }
             }
             anims.push(Anim { name: aname, frames, speed, looping });
+        }
+    }
+    // TiledBg et autres objets à image unique : champ "image" (sans animations)
+    if anims.is_empty() {
+        if let Some(img) = get(doc, &["image"]) {
+            let ox = get(img, &["originX"]).map(|v| as_f64(v, 0.5)).unwrap_or(0.5) as f32;
+            let oy = get(img, &["originY"]).map(|v| as_f64(v, 0.5)).unwrap_or(0.5) as f32;
+            anims.push(Anim {
+                name: "Default".into(),
+                frames: vec![FrameSpec { image: String::new(), ox, oy, image_points: Vec::new() }],
+                speed: 0.0,
+                looping: false,
+            });
         }
     }
     let is_global = get(doc, &["isGlobal"]).and_then(|v| v.as_bool()).unwrap_or(false);

@@ -281,8 +281,8 @@ pub fn save_c3p(project: &Project, path: &Path) -> Result<(), String> {
         let obj = normalize(&t.name);
         for a in &t.anims {
             let anim = normalize(&a.name);
-            for (i, key) in a.frames.iter().enumerate() {
-                let tex = match project.images.get(key) {
+            for (i, fs) in a.frames.iter().enumerate() {
+                let tex = match project.images.get(&fs.image) {
                     Some(t) => t.clone(),
                     None => placeholder_tex((obj.len() as u64) * 131 + i as u64 + 7),
                 };

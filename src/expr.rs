@@ -402,6 +402,12 @@ pub fn eval(e: &Expr, env: &mut dyn Env) -> Val {
         Expr::Num(n) => Val::Num(*n),
         Expr::Str(s) => Val::Str(s.clone()),
         Expr::Var(name) => {
+            if name.eq_ignore_ascii_case("true") {
+                return Val::Bool(true);
+            }
+            if name.eq_ignore_ascii_case("false") {
+                return Val::Bool(false);
+            }
             if let Some(v) = env.var(name) {
                 return v;
             }

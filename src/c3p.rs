@@ -47,7 +47,7 @@ pub fn load_bytes(bytes: &[u8]) -> Result<(Project, Vec<String>), String> {
     let mut types: Vec<ObjType> = Vec::new();
     let mut type_docs: Vec<(String, serde_json::Value)> = Vec::new();
     for (k, v) in &entries {
-        if k.starts_with("objectTypes/") && k.ends_with(".json") && !k.contains(".uistate") {
+        if k.starts_with("objectTypes/") && k.ends_with(".json") && !k.to_lowercase().contains("uistate") {
             match serde_json::from_slice(v) {
                 Ok(doc) => type_docs.push((k.clone(), doc)),
                 Err(e) => warnings.push(format!("{k}: JSON invalide ({e})")),
@@ -66,7 +66,7 @@ pub fn load_bytes(bytes: &[u8]) -> Result<(Project, Vec<String>), String> {
 
     // --- familles ---
     for (k, v) in &entries {
-        if k.starts_with("families/") && k.ends_with(".json") && !k.contains(".uistate") {
+        if k.starts_with("families/") && k.ends_with(".json") && !k.to_lowercase().contains("uistate") {
             if let Ok(doc) = serde_json::from_slice::<serde_json::Value>(v) {
                 let mut t = parse_object_type(&doc, &mut warnings);
                 if t.name.is_empty() || t.name == "Objet" {
@@ -80,9 +80,15 @@ pub fn load_bytes(bytes: &[u8]) -> Result<(Project, Vec<String>), String> {
 
     // --- layouts ---
     let mut layouts: Vec<Layout> = Vec::new();
+    // filtre robuste : uniquement layouts/<nom>.json (exclut les uistate et sous-dossiers)
     let mut layout_keys: Vec<&String> = entries
         .keys()
-        .filter(|k| k.starts_with("layouts/") && k.ends_with(".json") && !k.contains(".uistate"))
+        .filter(|k| {
+            k.starts_with("layouts/")
+                && k.ends_with(".json")
+                && !k.to_lowercase().contains("uistate")
+                && k.matches('/').count() == 1
+        })
         .collect();
     layout_keys.sort();
     for k in layout_keys {
@@ -98,7 +104,8 @@ pub fn load_bytes(bytes: &[u8]) -> Result<(Project, Vec<String>), String> {
         .filter(|k| {
             (k.starts_with("eventSheets/") || k.starts_with("eventtables/") || k.starts_with("eventTables/"))
                 && k.ends_with(".json")
-                && !k.contains(".uistate")
+                && !k.to_lowercase().contains("uistate")
+                && k.matches('/').count() == 1
         })
         .collect();
     sheet_keys.sort();
@@ -161,9 +168,10 @@ pub fn load_bytes(bytes: &[u8]) -> Result<(Project, Vec<String>), String> {
                 candidates.push(format!("{obj}.png"));
                 let found = candidates.iter().find(|c| images.contains_key(*c)).cloned()
                     .or_else(|| {
-                        // recherche floue: basename normalisé
-                        let want = candidates[0].clone();
-                        img_keys.iter().find(|k| normalize(k) == normalize(&want)).cloned()
+                        // recherche floue: basename normalisé, tous les candidats
+                        candidates.iter().find_map(|want| {
+                            img_keys.iter().find(|k| normalize(k) == normalize(want)).cloned()
+                        })
                     });
                 let final_key = match found {
                     Some(key) => Some(key),
@@ -171,10 +179,10 @@ pub fn load_bytes(bytes: &[u8]) -> Result<(Project, Vec<String>), String> {
                         warnings.push(format!("image manquante pour {}/{}", t.name, a.name));
                         None
                     }
-                    None => a.frames.first().cloned(), // réutilise la frame 0
+                    None => a.frames.first().map(|f| f.image.clone()), // réutilise la frame 0
                 };
                 if let Some(key) = final_key {
-                    a.frames[i] = key;
+                    a.frames[i].image = key;
                 }
             }
         }
@@ -227,7 +235,24 @@ pub fn decode_png(data: &[u8]) -> Result<Tex, String> {
                 rgba.extend_from_slice(&[px[0], px[0], px[0], px[1]]);
             }
         }
-        png::ColorType::Indexed => return Err("PNG indexé non supporté".into()),
+        png::ColorType::Indexed => {
+            // palette + éventuelle transparence (tRNS)
+            let info2 = reader.info();
+            let palette = info2.palette.clone().ok_or("PNG indexé sans palette")?;
+            let trns = info2.trns.clone().unwrap_or_default();
+            for &idx in &buf[..(w * h) as usize] {
+                let (r, g, b) = {
+                    let p = (idx as usize) * 3;
+                    if p + 2 < palette.len() {
+                        (palette[p], palette[p + 1], palette[p + 2])
+                    } else {
+                        (0, 0, 0)
+                    }
+                };
+                let a = if (idx as usize) < trns.len() { trns[idx as usize] } else { 255 };
+                rgba.extend_from_slice(&[r, g, b, a]);
+            }
+        }
     }
     Ok(Tex { w, h, rgba })
 }

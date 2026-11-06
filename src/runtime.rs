@@ -79,7 +79,18 @@ pub enum Beh {
     Wrap,
     Solid,
     Pin { target: Option<usize> },
+    Turret { reload: f32, targets: Vec<String> },
     Other,
+}
+
+/// état de l'action Flash (clignotement temporaire)
+#[derive(Debug, Clone, Copy)]
+pub struct FlashState {
+    pub on_t: f32,
+    pub off_t: f32,
+    pub end: f32,
+    pub t: f32,
+    pub lit: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +130,7 @@ pub struct Inst {
     pub tint: Option<Rgba>,
     pub prev_x: f32,
     pub prev_y: f32,
+    pub flash: Option<FlashState>,
 }
 
 impl Inst {
@@ -152,6 +164,7 @@ pub struct Engine {
     pub globals: HashMap<String, Val>,
     pub globals_init: HashMap<String, Val>,
     pub locals: HashMap<String, Val>,
+    pub locals_init: HashMap<String, Val>,
     pub scroll: (f32, f32),
     pub view_w: f32,
     pub view_h: f32,
@@ -176,6 +189,12 @@ pub struct Engine {
     pub pending: Option<PendingNav>,
     sheet_events: Vec<Event>,
     pub scroll_lock: bool,
+    /// comportements Tourelle : id -> cibles (types d'objets)
+    pub turret_targets: HashMap<usize, Vec<String>>,
+    /// tourelles qui ont tiré pendant ce tick (condition on-shoot)
+    pub turret_fired: HashSet<usize>,
+    /// action move-to-object : id -> id de l'instance cible
+    pub moveto: HashMap<usize, usize>,
 }
 
 fn normkey(s: &str) -> String {
@@ -199,6 +218,7 @@ impl Engine {
             globals: HashMap::new(),
             globals_init: HashMap::new(),
             locals: HashMap::new(),
+            locals_init: HashMap::new(),
             scroll: (0.0, 0.0),
             time: 0.0,
             dt: 1.0 / 60.0,
@@ -221,6 +241,9 @@ impl Engine {
             pending: None,
             sheet_events: Vec::new(),
             scroll_lock: false,
+            turret_targets: HashMap::new(),
+            turret_fired: HashSet::new(),
+            moveto: HashMap::new(),
         };
         eng.seed_rng();
         eng.collect_globals();
@@ -308,8 +331,8 @@ impl Engine {
         if w <= 0.0 || h <= 0.0 {
             if let Some(t) = &tinfo {
                 if let Some(a) = t.anims.first() {
-                    if let Some(frame_key) = a.frames.first() {
-                        if let Some(tex) = self.project.images.get(frame_key) {
+                    if let Some(frame) = a.frames.first() {
+                        if let Some(tex) = self.project.images.get(&frame.image) {
                             if w <= 0.0 {
                                 w = tex.w as f32;
                             }
@@ -336,7 +359,9 @@ impl Engine {
                 BKind::Wrap => Beh::Wrap,
                 BKind::Solid => Beh::Solid,
                 BKind::Pin => Beh::Pin { target: None },
+                BKind::Turret => Beh::Turret { reload: 0.0, targets: Vec::new() },
                 BKind::Other => Beh::Other,
+                _ => Beh::Other,
             };
             if let Some(b) = out.iter_mut().find(|b| normkey(&b.name) == normkey(name)) {
                 b.props = props.clone();
@@ -383,6 +408,7 @@ impl Engine {
             tint: None,
             prev_x: spec.x,
             prev_y: spec.y,
+            flash: None,
         };
         for b in &mut inst.behaviors {
             if let Beh::Sine { base_x, base_y, .. } = &mut b.state {
@@ -418,12 +444,14 @@ impl Engine {
 
     fn load_locals(&mut self) {
         self.locals.clear();
+        self.locals_init.clear();
         let mut g = HashMap::new();
         let mut l: Vec<(String, Val)> = Vec::new();
         Self::collect_vars(&self.sheet_events.clone(), true, &mut g, &mut l);
         let _ = g;
         for (k, v) in l {
-            self.locals.insert(k, v);
+            self.locals.insert(k.clone(), v.clone());
+            self.locals_init.insert(k, v);
         }
     }
 
@@ -508,6 +536,7 @@ impl Engine {
         self.landed.clear();
         self.anim_finished.clear();
         self.timer_fired.clear();
+        self.turret_fired.clear();
 
         self.update_behaviors(dt);
         self.run_events();
@@ -548,6 +577,9 @@ impl Engine {
         self.sim_ctrl.clear();
         self.start_flag = true;
         self.scroll_lock = false;
+        self.turret_targets.clear();
+        self.turret_fired.clear();
+        self.moveto.clear();
         self.build_instances();
         self.load_locals();
         self.resolve_sheet();
@@ -693,9 +725,12 @@ fn move_y(inst: &mut Inst, dy: f32, solids: &[(f32, f32, f32, f32)]) -> u8 {
                     BKind::Fade => self.update_fade(id, &bname, dt),
                     BKind::Wrap => self.update_wrap(id, dt),
                     BKind::DestroyOutside => self.update_destroy_outside(id),
+                    BKind::Turret => self.update_turret(id, &bname, dt),
                     _ => {}
                 }
             }
+            // action move-to-object en cours ?
+            self.update_moveto(id, dt);
         }
         // pins après tous les déplacements
         let pins: Vec<usize> = self
@@ -1016,9 +1051,139 @@ fn move_y(inst: &mut Inst, dy: f32, solids: &[(f32, f32, f32, f32)]) -> u8 {
         }
     }
 
+    /// comportement Tourelle : acquisition de cible, rotation, tir périodique
+    fn update_turret(&mut self, id: usize, bname: &str, dt: f32) {
+        let (range, rate, rot_speed) = match self.inst(id) {
+            Some(i) => match i.behaviors.iter().find(|b| b.name == bname) {
+                Some(b) => (
+                    prop_f(&b.props, &["range", "portee"], 400.0) as f32,
+                    prop_f(&b.props, &["rate-of-fire", "fire-rate", "rate", "cadence"], 1.0).max(0.01) as f32,
+                    prop_f(&b.props, &["rotate-speed", "rotate", "rotation-speed"], 360.0) as f32,
+                ),
+                None => return,
+            },
+            None => return,
+        };
+        let targets = match self.turret_targets.get(&id) {
+            Some(t) => t.clone(),
+            None => return, // aucune cible déclarée : la tourelle ne tire pas
+        };
+        // cible la plus proche parmi les types déclarés
+        let mut best: Option<(f32, f32, f32)> = None; // (dist, x, y)
+        for tname in &targets {
+            for tid in self.instances_of(tname) {
+                if let Some(ti) = self.inst(tid) {
+                    if let Some(si) = self.inst(id) {
+                        let dx = ti.cx() - si.cx();
+                        let dy = ti.cy() - si.cy();
+                        let d = (dx * dx + dy * dy).sqrt();
+                        if d <= range && best.map(|(bd, _, _)| d < bd).unwrap_or(true) {
+                            best = Some((d, ti.cx(), ti.cy()));
+                        }
+                    }
+                }
+            }
+        }
+        let Some((dist, tx, ty)) = best else { return };
+        // rotation vers la cible
+        let want = (ty - self.inst(id).map(|i| i.cy()).unwrap_or(ty)).atan2(tx - self.inst(id).map(|i| i.cx()).unwrap_or(tx)) * 180.0 / std::f32::consts::PI;
+        let step = (rot_speed * dt) as f32;
+        if let Some(i) = self.inst_mut(id) {
+            let diff = (want - i.angle + 540.0).rem_euclid(360.0) - 180.0;
+            if diff.abs() <= step {
+                i.angle = want;
+            } else {
+                i.angle += diff.signum() * step;
+            }
+        }
+        // rechargement + tir
+        let reload = match self.inst(id).and_then(|i| i.behaviors.iter().find(|b| b.name == bname)) {
+            Some(b) => match &b.state {
+                Beh::Turret { reload, .. } => *reload,
+                _ => return,
+            },
+            None => return,
+        };
+        let new_reload = if reload <= 0.0 {
+            self.turret_fired.insert(id);
+            1.0 / rate
+        } else {
+            reload - dt
+        };
+        if let Some(i) = self.inst_mut(id) {
+            if let Some(b) = i.behaviors.iter_mut().find(|b| b.name == bname) {
+                if let Beh::Turret { reload, .. } = &mut b.state {
+                    *reload = new_reload;
+                }
+            }
+        }
+        let _ = dist;
+    }
+
+    /// déplacement vers la cible posé par l'action move-to-object
+    fn update_moveto(&mut self, id: usize, dt: f32) {
+        let Some(&tid) = self.moveto.get(&id) else { return };
+        let speed = match self.inst(id) {
+            Some(i) => i
+                .behaviors
+                .iter()
+                .find(|b| b.kind == BKind::MoveTo)
+                .map(|b| prop_f(&b.props, &["speed", "max-speed", "vitesse"], 250.0) as f32)
+                .unwrap_or(250.0),
+            None => return,
+        };
+        let (tx, ty) = match self.inst(tid) {
+            Some(t) => (t.cx(), t.cy()),
+            None => {
+                self.moveto.remove(&id);
+                return;
+            }
+        };
+        let (sx, sy) = match self.inst(id) {
+            Some(i) => (i.cx(), i.cy()),
+            None => return,
+        };
+        let dx = tx - sx;
+        let dy = ty - sy;
+        let d = (dx * dx + dy * dy).sqrt();
+        let step = (speed * dt).max(0.001);
+        if d <= step.max(2.0) {
+            // arrivé
+            self.moveto.remove(&id);
+            return;
+        }
+        let ux = dx / d;
+        let uy = dy / d;
+        if let Some(i) = self.inst_mut(id) {
+            i.x += ux * step;
+            i.y += uy * step;
+            // oriente vers la direction du déplacement (comme MoveTo "direct")
+            i.angle = uy.atan2(ux) * 180.0 / std::f32::consts::PI;
+        }
+    }
+
     fn update_animations(&mut self, dt: f32) {
         for i in &mut self.instances {
-            if i.destroyed || i.anim_speed <= 0.0 {
+            if i.destroyed {
+                continue;
+            }
+            // état Flash (clignotement)
+            let mut clear_flash = false;
+            if let Some(fl) = &mut i.flash {
+                let cycle = fl.on_t + fl.off_t;
+                if cycle > 0.0 {
+                    let phase = fl.t % cycle;
+                    fl.lit = phase < fl.on_t;
+                }
+                fl.t += dt;
+                if self.time >= fl.end {
+                    clear_flash = true;
+                }
+            }
+            if clear_flash {
+                i.flash = None;
+            }
+            if i.anim_speed <= 0.0 {
                 continue;
             }
             let nframes = self
@@ -1073,6 +1238,9 @@ fn move_y(inst: &mut Inst, dy: f32, solids: &[(f32, f32, f32, f32)]) -> u8 {
         let alive: HashSet<usize> = self.instances.iter().map(|i| i.id).collect();
         self.last_collisions.retain(|(a, b)| alive.contains(a) && alive.contains(b));
         self.timers.retain(|(id, _), _| alive.contains(id));
+        self.turret_targets.retain(|id, _| alive.contains(id));
+        self.turret_fired.retain(|id| alive.contains(id));
+        self.moveto.retain(|id, _| alive.contains(id));
     }
 
     fn update_camera(&mut self) {
@@ -1305,6 +1473,11 @@ fn kind_key(k: BKind) -> &'static str {
         BKind::Timer => "timer",
         BKind::Wrap => "wrap",
         BKind::Pin => "pin",
+        BKind::Turret => "turret",
+        BKind::LineOfSight => "lineofsight",
+        BKind::MoveTo => "moveto",
+        BKind::Flash => "flash",
+        BKind::Anchor => "anchor",
         BKind::Other => "other",
     }
 }
@@ -1648,6 +1821,98 @@ impl Engine {
                 let b = param(c, &["mouse-button", "button"]).map(|s| mouse_btn(s)).unwrap_or(0);
                 self.input.mouse_down.contains(&b)
             }
+            "on-clicked" | "on-touch-object" => {
+                let b = param(c, &["mouse-button", "button"]).map(|s| mouse_btn(s)).unwrap_or(0);
+                if !self.input.mouse_pressed.contains(&b) {
+                    return false;
+                }
+                self.ensure_picked(picked, &c.object);
+                let ids = self.candidates(picked, &c.object);
+                // la souris est fournie en coordonnées vue -> coordonnées layout
+                let (mx, my) = (self.input.mouse.0 + self.scroll.0, self.input.mouse.1 + self.scroll.1);
+                let keep: Vec<usize> = ids
+                    .into_iter()
+                    .filter(|id| match self.inst(*id) {
+                        Some(i) => {
+                            let (l, t, r, b2) = i.bbox();
+                            mx >= l && mx <= r && my >= t && my <= b2
+                        }
+                        None => false,
+                    })
+                    .collect();
+                picked.insert(c.object.clone(), keep.clone());
+                !keep.is_empty()
+            }
+            "compare-boolean-eventvar" => {
+                let name = param(c, &["variable"]).map(|s| unquote(s)).unwrap_or_default();
+                let cur = self
+                    .locals
+                    .get(&name)
+                    .cloned()
+                    .or_else(|| self.globals.get(&name).cloned())
+                    .unwrap_or(Val::Bool(false));
+                cur.num() != 0.0
+            }
+            "has-los-to-object" => {
+                let other = param(c, &["object"]).map(|s| unquote(s)).unwrap_or_default();
+                self.ensure_picked(picked, &c.object);
+                let a_ids = self.candidates(picked, &c.object);
+                let b_ids = self.candidates(picked, &other);
+                let Some(&bid) = b_ids.first() else { return false };
+                // obstacles = instances solides (hors self et cible)
+                let blockers: Vec<(f32, f32, f32, f32)> = self
+                    .instances
+                    .iter()
+                    .filter(|i| {
+                        !i.destroyed
+                            && i.id != bid
+                            && !a_ids.contains(&i.id)
+                            && i.behaviors.iter().any(|b| b.kind == BKind::Solid && b.enabled)
+                    })
+                    .map(|i| i.bbox())
+                    .collect();
+                let keep: Vec<usize> = a_ids
+                    .into_iter()
+                    .filter(|a| match self.inst(*a) {
+                        Some(ai) => match self.inst(bid) {
+                            Some(bi) => {
+                                let (x0, y0) = (ai.cx(), ai.cy());
+                                let (x1, y1) = (bi.cx(), bi.cy());
+                                blockers.iter().all(|&(l, t, r, b2)| !seg_aabb(x0, y0, x1, y1, l, t, r, b2))
+                            }
+                            None => false,
+                        },
+                        None => false,
+                    })
+                    .collect();
+                picked.insert(c.object.clone(), keep.clone());
+                !keep.is_empty()
+            }
+            "is-on-screen" => {
+                self.ensure_picked(picked, &c.object);
+                let ids = self.candidates(picked, &c.object);
+                let (vx0, vy0) = self.scroll;
+                let (vx1, vy1) = (vx0 + self.view_w, vy0 + self.view_h);
+                let keep: Vec<usize> = ids
+                    .into_iter()
+                    .filter(|id| match self.inst(*id) {
+                        Some(i) => {
+                            let (l, t, r, b2) = i.bbox();
+                            l < vx1 && r > vx0 && t < vy1 && b2 > vy0
+                        }
+                        None => false,
+                    })
+                    .collect();
+                picked.insert(c.object.clone(), keep.clone());
+                !keep.is_empty()
+            }
+            "on-shoot" => {
+                self.ensure_picked(picked, &c.object);
+                let ids = self.candidates(picked, &c.object);
+                let keep: Vec<usize> = ids.into_iter().filter(|id| self.turret_fired.contains(id)).collect();
+                picked.insert(c.object.clone(), keep.clone());
+                !keep.is_empty()
+            }
             _ => {
                 self.warn(&format!("condition « {} » non supportée (ignorée comme fausse)", c.id));
                 false
@@ -1817,8 +2082,9 @@ impl Engine {
     fn run_action(&mut self, a: &Act, picked: &Picked) {
         match a.id.as_str() {
             "go-to-layout" => {
-                let name = self.eval_str_with(aparam(a, &["layout"]).map(|s| s.as_str()).unwrap_or(""), picked, None);
-                self.pending = Some(PendingNav::Layout(unquote(&name)));
+                // le nom peut être un littéral non quoté (ex: Scène 1) -> on ne l'évalue pas comme expression
+                let raw = aparam(a, &["layout"]).map(|s| s.as_str()).unwrap_or("").trim().to_string();
+                self.pending = Some(PendingNav::Layout(unquote(&raw)));
             }
             "restart-layout" => self.pending = Some(PendingNav::Restart),
             "next-layout" | "previous-layout" => {
@@ -1839,16 +2105,73 @@ impl Engine {
             }
             "spawn-another-object" => {
                 let obj = aparam(a, &["object"]).map(|s| unquote(s)).unwrap_or_default();
-                let (x, y) = match picked
-                    .get(&a.object)
-                    .and_then(|l| l.first().copied())
-                    .and_then(|id| self.inst(id).map(|i| (i.cx(), i.cy())))
-                {
-                    Some((cx, cy)) => (cx, cy),
+                let spawner = picked.get(&a.object).and_then(|l| l.first().copied());
+                let ip = aparam(a, &["image-point"])
+                    .and_then(|s| s.trim().parse::<i64>().ok())
+                    .unwrap_or(0);
+                let (x, y) = match spawner {
+                    Some(id) => self.image_point(id, ip.max(0) as usize),
                     None => (0.0, 0.0),
                 };
+                let angle = spawner.and_then(|id| self.inst(id)).map(|i| i.angle).unwrap_or(0.0);
                 let layer_name = aparam(a, &["layer"]).map(|s| unquote(s)).unwrap_or_default();
-                self.spawn_instance(&obj, x, y, &layer_name);
+                self.spawn_instance_angle(&obj, x, y, &layer_name, angle);
+            }
+            "add-object-to-target" => {
+                let target = aparam(a, &["target"]).map(|s| unquote(s)).unwrap_or_default();
+                if !target.is_empty() {
+                    for id in self.targets(a, picked) {
+                        let list = self.turret_targets.entry(id).or_default();
+                        if !list.contains(&target) {
+                            list.push(target.clone());
+                        }
+                    }
+                }
+            }
+            "move-to-object" => {
+                let obj = aparam(a, &["object"]).map(|s| unquote(s)).unwrap_or_default();
+                let tid = self.candidates(picked, &obj).first().copied();
+                if let Some(tid) = tid {
+                    for id in self.targets(a, picked) {
+                        if id != tid {
+                            self.moveto.insert(id, tid);
+                        }
+                    }
+                }
+            }
+            "pin-to-object-properties" | "pin-to-object" => {
+                let pin_to = aparam(a, &["pin-to", "object"]).map(|s| unquote(s)).unwrap_or_default();
+                let tid = self.candidates(picked, &pin_to).first().copied();
+                for id in self.targets(a, picked) {
+                    if Some(id) == tid {
+                        continue;
+                    }
+                    if let Some(i) = self.inst_mut(id) {
+                        if let Some(b) = i.behaviors.iter_mut().find(|b| b.kind == BKind::Pin) {
+                            b.state = Beh::Pin { target: tid };
+                            b.enabled = true;
+                        } else {
+                            i.behaviors.push(BehState {
+                                name: "Pin".into(),
+                                kind: BKind::Pin,
+                                enabled: true,
+                                props: HashMap::new(),
+                                state: Beh::Pin { target: tid },
+                            });
+                        }
+                    }
+                }
+            }
+            "flash" => {
+                let on = self.eval_num(aparam(a, &["on-time"]).map(|s| s.as_str()).unwrap_or("0.1"), picked, None) as f32;
+                let off = self.eval_num(aparam(a, &["off-time"]).map(|s| s.as_str()).unwrap_or("0.1"), picked, None) as f32;
+                let dur = self.eval_num(aparam(a, &["duration"]).map(|s| s.as_str()).unwrap_or("1.0"), picked, None) as f32;
+                let end = self.time + dur;
+                for id in self.targets(a, picked) {
+                    if let Some(i) = self.inst_mut(id) {
+                        i.flash = Some(FlashState { on_t: on.max(0.01), off_t: off.max(0.01), end, t: 0.0, lit: true });
+                    }
+                }
             }
             "destroy" => {
                 for id in self.targets(a, picked) {
@@ -2137,6 +2460,17 @@ impl Engine {
                 }
             }
             "reset-global-variables" => self.globals = self.globals_init.clone(),
+            "reset-eventvar" | "reset-event-variable" => {
+                let name = aparam(a, &["variable"]).map(|s| unquote(s)).unwrap_or_default();
+                if let Some(v) = self.locals_init.get(&name).cloned() {
+                    self.locals.insert(name, v);
+                } else if let Some(v) = self.globals_init.get(&name).cloned() {
+                    self.globals.insert(name, v);
+                }
+            }
+            "wait" => {
+                // attente bloquante C3 : les actions suivantes s'exécutent immédiatement (simplification)
+            }
             "wait-for-previous-actions" => {}
             "log" => {
                 let msg = self.eval_str_with(aparam(a, &["message"]).map(|s| s.as_str()).unwrap_or(""), picked, None);
@@ -2147,6 +2481,30 @@ impl Engine {
     }
 
     fn spawn_instance(&mut self, obj_name: &str, x: f32, y: f32, layer_name: &str) {
+        self.spawn_instance_angle(obj_name, x, y, layer_name, 0.0);
+    }
+
+    /// position d'un point d'image (0 = origine, n = n-ième point d'image)
+    pub fn image_point(&self, id: usize, index: usize) -> (f32, f32) {
+        let Some(i) = self.inst(id) else { return (0.0, 0.0) };
+        if index == 0 {
+            return (i.x, i.y); // point 0 = origine
+        }
+        let t = self.project.type_of(&i.type_name);
+        let frame = t
+            .and_then(|t| t.anims.get(i.anim_idx))
+            .and_then(|a| a.frames.get(i.frame.min(a.frames.len().saturating_sub(1))));
+        match frame.and_then(|f| f.image_points.get(index - 1)) {
+            Some(&(fx, fy)) => {
+                let (l, t2, _, _) = i.bbox();
+                let fx = if i.mirrored { 1.0 - fx } else { fx };
+                (l + fx * i.w, t2 + fy * i.h)
+            }
+            None => (i.x, i.y),
+        }
+    }
+
+    fn spawn_instance_angle(&mut self, obj_name: &str, x: f32, y: f32, layer_name: &str, angle: f32) {
         let t = match self.project.type_of(obj_name) {
             Some(t) => t.clone(),
             None => {
@@ -2163,13 +2521,13 @@ impl Engine {
             .iter()
             .position(|l| l.name.eq_ignore_ascii_case(layer_name))
             .unwrap_or(0);
-        let (w, h) = t
-            .anims
-            .first()
-            .and_then(|a| a.frames.first())
-            .and_then(|k| self.project.images.get(k))
+        let frame = t.anims.first().and_then(|a| a.frames.first());
+        let (w, h) = frame
+            .and_then(|f| self.project.images.get(&f.image))
             .map(|tex| (tex.w as f32, tex.h as f32))
             .unwrap_or((32.0, 32.0));
+        // origine par défaut = origine de la frame du type
+        let (fox, foy) = frame.map(|f| (f.ox, f.oy)).unwrap_or((0.5, 0.5));
         let mut vars = HashMap::new();
         for (k, v) in &t.vars {
             vars.insert(k.clone(), v.clone());
@@ -2183,6 +2541,7 @@ impl Engine {
                 BKind::Sine => Beh::Sine { base_x: x, base_y: y, t: 0.0 },
                 BKind::Fade => Beh::Fade { phase: 0, t: 0.0 },
                 BKind::Pin => Beh::Pin { target: None },
+                BKind::Turret => Beh::Turret { reload: 0.0, targets: Vec::new() },
                 _ => Beh::Other,
             };
             behaviors.push(BehState { name: b.name.clone(), kind: b.kind, enabled: true, props: b.props.clone(), state: st });
@@ -2195,12 +2554,12 @@ impl Engine {
             y,
             w,
             h,
-            angle: 0.0,
+            angle,
             opacity: 1.0,
             layer,
             visible: true,
-            ox: 0.5,
-            oy: 0.5,
+            ox: fox,
+            oy: foy,
             z: 0.0,
             vars,
             props: if t.plugin == Plugin::Text {
@@ -2221,6 +2580,7 @@ impl Engine {
             tint: None,
             prev_x: x,
             prev_y: y,
+            flash: None,
         };
         self.instances.push(inst);
         self.next_id += 1;
@@ -2231,6 +2591,33 @@ pub struct BehPlatformView {
     pub vx: f32,
     pub vy: f32,
     pub on_floor: bool,
+}
+
+/// intersection segment -> AABB (méthode des slabs)
+fn seg_aabb(x0: f32, y0: f32, x1: f32, y1: f32, l: f32, t: f32, r: f32, b: f32) -> bool {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let mut tmin = 0.0f32;
+    let mut tmax = 1.0f32;
+    for &(p, d, lo, hi) in &[(x0, dx, l, r), (y0, dy, t, b)] {
+        if d.abs() < 1e-9 {
+            if p < lo || p > hi {
+                return false;
+            }
+        } else {
+            let mut t1 = (lo - p) / d;
+            let mut t2 = (hi - p) / d;
+            if t1 > t2 {
+                std::mem::swap(&mut t1, &mut t2);
+            }
+            tmin = tmin.max(t1);
+            tmax = tmax.min(t2);
+            if tmin > tmax {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn mouse_btn(s: &str) -> u8 {
@@ -2249,8 +2636,8 @@ fn mouse_btn(s: &str) -> u8 {
 fn texture_for(eng: &Engine, inst: &Inst) -> Option<crate::model::Tex> {
     let t = eng.project.type_of(&inst.type_name)?;
     let anim = t.anims.get(inst.anim_idx)?;
-    let key = anim.frames.get(inst.frame).or_else(|| anim.frames.first())?;
-    eng.project.images.get(key).cloned()
+    let frame = anim.frames.get(inst.frame).or_else(|| anim.frames.first())?;
+    eng.project.images.get(&frame.image).cloned()
 }
 
 pub fn render_frame(eng: &Engine) -> FrameBuf {
@@ -2273,6 +2660,12 @@ pub fn render_frame(eng: &Engine) -> FrameBuf {
         let px = eng.scroll.0 * (layer.parallax.0 / 100.0);
         let py = eng.scroll.1 * (layer.parallax.1 / 100.0);
         for inst in eng.instances.iter().filter(|i| i.layer == li && i.visible && !i.destroyed) {
+            // clignotement : phase éteinte -> on ne dessine pas
+            if let Some(fl) = &inst.flash {
+                if !fl.lit {
+                    continue;
+                }
+            }
             let (l, t, _, _) = inst.bbox();
             let sx = l - px;
             let sy = t - py;

@@ -15,9 +15,20 @@ rendu GPU (wgpu). Projet original indépendant, non affilié à Scirra Ltd.
   - .c3p → ouverture de projet
   - audio WAV/OGG/MP3/FLAC/MOD…, polices TTF/OTF (appliquées à l'UI), archives, données → bibliothèque
 - **Runtime** : comportements Platform, 8Direction, Bullet, Sine, Fade, Solid, ScrollTo,
-  DestroyOutsideLayout, Wrap, Timer, Pin ; interpréteur d'événements (conditions, actions,
-  boucles for/for-each, sinon, groupes, includes) ; **évaluateur d'expressions C3**
-  (opérateurs, `Objet.Propriété`, `Self`, `random()`, `floor()`, `&` concaténation…)
+  DestroyOutsideLayout, Wrap, Timer, Pin, **Tourelle (acquisition de cible, rotation, tir)**,
+  **LigneDeMire (raycast contre les solides)**, **DéplacerVers**, Flash, Ancre ;
+  interpréteur d'événements (conditions, actions, boucles for/for-each, sinon, groupes,
+  includes) ; **évaluateur d'expressions C3** (opérateurs, `Objet.Propriété`, `Self`,
+  `random()`, `floor()`, `true`/`false`, `&` concaténation…)
+- Conditions clés : on-clicked (souris sur l'objet), on-shoot, has-los-to-object,
+  is-on-screen, compare-boolean-eventvar, collisions, variables, clavier, timers…
+- Actions clés : go-to-layout, restart-layout, spawn-another-object (**points d'image**,
+  angle hérité), add-object-to-target, move-to-object, pin-to-object-properties, flash,
+  reset-eventvar, create-object, destroy, variables (set/add/subtract/reset)…
+- Textures : PNG RGBA/RGB/gris/**indexés (palette+tRNS)**, sprites animés multi-frames,
+  TiledBackground via le champ `image`, points d'image, origines par frame
+- Rendu logiciel intégré : sprites avec rotation/miroir, tiling, parallaxe, texte,
+  caméra (ScrollTo + clamp), clignotement (Flash)
 - **Enregistrement .c3p** : le projet (avec vos images importées) peut être réécrit en .c3p
 - Rendu logiciel intégré : sprites avec rotation, tiling, parallaxe, texte, caméra
 
@@ -27,6 +38,7 @@ rendu GPU (wgpu). Projet original indépendant, non affilié à Scirra Ltd.
 c3rs                     ouvre l'éditeur (ou : c3rs edit [fichier.c3p])
 c3rs run    jeu.c3p      exécute le jeu en fenêtre (flèches/WASD + Espace, Échap pour quitter)
 c3rs render jeu.c3p out.png --ticks 240 --keys 39   capture headless (CI, tests)
+c3rs render jeu.c3p out.png --click 430,414 --at 5 --ticks 150   simule un clic (tests boutons)
 c3rs inspect jeu.c3p     structure du projet
 c3rs validate jeu.c3p    vérifie les références
 c3rs resave jeu.c3p out.c3p   re-sauvegarde (round-trip)
@@ -45,6 +57,7 @@ cargo build --release      # binaire unique, aucune dépendance système imposé
 
 - sous-ensemble du runtime C3 (les événements/actions non supportés sont signalés dans la console)
 - pas de lecture audio ni de familles complètes, pas de fonctions C3
+- `wait` n'interrompt pas le bloc (les actions suivantes s'exécutent immédiatement)
 - angles : le format C3 stocke des radians, convertis en degrés par c3rs
 
 ## Licence
