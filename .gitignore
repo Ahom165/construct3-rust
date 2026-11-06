@@ -1,0 +1,6 @@
+/target
+/dist
+*.zip
+!demo/demo-platformer.c3p
+__pycache__/
+*.pyc

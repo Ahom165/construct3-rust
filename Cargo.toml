@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["crates/c3-core", "crates/c3-editor", "crates/c3rs-native"]
+
+[profile.release]
+opt-level = 2
+lto = false

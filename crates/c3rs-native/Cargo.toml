@@ -1,0 +1,23 @@
+[package]
+name = "c3rs-native"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Native runtime for .c3p projects (windowed + headless render, bonus CLI)"
+
+[[bin]]
+name = "c3rs"
+path = "src/main.rs"
+
+[lib]
+name = "c3rs"
+path = "src/lib.rs"
+
+[dependencies]
+c3-core = { path = "../c3-core" }
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+font8x8 = "0.3"
+minifb = "0.27"
+png = "0.17"
