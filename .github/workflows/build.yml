@@ -23,10 +23,12 @@ jobs:
             name: windows-x86_64
             bin: c3rs.exe
             zipper: ps
-          - os: macos-14
-            name: macos-aarch64
-            bin: c3rs
-            zipper: zip
+          # NOTE macOS : les runners macOS sont refusés sur ce compte GitHub
+          # (job annulé à l'allocation). Ré-activer quand le compte y a accès :
+          # - os: macos-14
+          #   name: macos-aarch64
+          #   bin: c3rs
+          #   zipper: zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
